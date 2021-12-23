@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <algorithm>
+#include <x86intrin.h>
 #include <NTL/LLL.h>
 #include <sys/time.h>
 
@@ -10,14 +11,11 @@ using namespace NTL;
 #define NUM_COMPONENT 3
 #define BUCKET_INIT_SIZE 7
 #define BUCKET_ENLARGE_SIZE 3
-#define XOR_POPCNT_THRESHOLD 65
+#define XOR_POPCNT_THRESHOLD 50
 #define deux28 (((long long) 2) << 28)
 #define SHOW_DETAILS true
 
-long min(long a, long b){
-    if (a > b) return b;
-    return a;
-}
+
 double gh_coeff(long n){
     double a = 1.0;
     if (n%2 == 0){
@@ -35,22 +33,36 @@ double gh_coeff(long n){
     a = a / sqrt(3.14159265357989324);
     return a;
 }
-float dot(float *a, float *b, long n){
-    float x = 0.0;
-    for (long i = 0; i < n; i++){
-        x += a[i]*b[i];
-    }
-    return x; 
+inline float dot(float *a, float *b, long n){
+	__m512 r0 = _mm512_setzero_ps();
+	__m512 x0, y0;
+	for (long i = 0; i < n/16; i++){
+		x0 = _mm512_load_ps(a+16*i);
+		y0 = _mm512_load_ps(b+16*i);
+		r0 = _mm512_fmadd_ps(x0, y0, r0);
+	}
+
+	__m256 r256 = _mm256_add_ps(_mm512_castps512_ps256(r0), _mm512_extractf32x8_ps(r0, 1));
+	__m128 r128 = _mm_add_ps(_mm256_castps256_ps128(r256), _mm256_extractf32x4_ps(r256, 1));
+	r128 = _mm_add_ps(r128, _mm_permute_ps(r128, 78)); 
+	r128 = _mm_add_ps(r128, _mm_shuffle_ps(r128, r128, 85));
+	return _mm_cvtss_f32(r128);
 }
-void add(float *a, float *b, long n){
-    for (long i = 0; i < n; i++){
-        a[i] += b[i];
-    }
+inline void add(float *a, float *b, long n){
+	__m512 x0, y0;
+	for (long i = 0; i < n/16; i++){
+		x0 = _mm512_load_ps(a+i*16);
+		y0 = _mm512_load_ps(b+i*16);
+		_mm512_store_ps(a+16*i, _mm512_add_ps(x0,y0));
+	}
 }
-void min(float *a, float *b, long n){
-    for (long i = 0; i < n; i++){
-        a[i] -= b[i];
-    }
+inline void sub(float *a, float *b, long n){
+	__m512 x0, y0;
+	for (long i = 0; i < n/16; i++){
+		x0 = _mm512_load_ps(a+i*16);
+		y0 = _mm512_load_ps(b+i*16);
+		_mm512_store_ps(a+16*i, _mm512_sub_ps(x0,y0));
+	}
 }
 float dot_slow(float *a, float *b, long n){
     float x = 0.0;
@@ -245,7 +257,7 @@ void improve_poly(float* Polytope, long m, long Psize, float delta){
         }
 	}
 }
-void compute_Simhash(float *res, uint32_t* compress_pos){       //0.83
+void compute_Simhash(float *res, uint32_t* compress_pos){       
     uint64_t clo, chi;
     float a[2];
     uint32_t *alo = (uint32_t *)(&a[0]);
@@ -299,7 +311,6 @@ void sampling_on_dim(long current_dim, float *res, long n, double **b, double **
             res[j] += coeff[i]*b[i][j];
         }
     }
-    print(&coeff[0],current_dim);
     res[-1] = norm_slow(res, n);
     compute_Simhash(res, compress_pos);
 }
@@ -421,39 +432,7 @@ void ListDecode(long *I, float *ptr, long n, long m, long Psize, float *Polytope
     }	
     
 }
-void ListDecode_slow(long *I, float *ptr, long n, long m, long Psize, float *Polytope, float *vec_tmp, float delta){        //23.19+0.6
-    float vec[n];
-    for (long i = 0; i < n; i++){
-        vec_tmp[i] = ptr[i];
-    }
-    float xx = 1/sqrt(norm_slow(ptr, n)*NUM_COMPONENT);
-    for (long i = 0; i < n; i++){
-        vec_tmp[i] *= xx;
-    }
-    long count = 0;
-    for (long j0 = 0; j0 < Psize; j0++){
-        for (long j1 =0; j1 < Psize; j1++){
-            for (long j2 = 0; j2 < Psize; j2++){
-                for (long j3 = 0; j3 < Psize; j3++){
-                    for (long i = 0; i < m; i++){
-                        vec[i] = Polytope[j0*m+i];
-                        vec[i+m] = Polytope[j1*m+i];
-                        vec[i+2*m] = Polytope[j2*m+i];
-                        vec[i+3*m] = Polytope[j3*m+i];
-                        
-                    }
-                    float x = dot(&vec[0], vec_tmp, n);
-                    if (x > delta){
-                        count++;
-                        I[count] = j0*Psize*Psize*Psize+j1*Psize*Psize+j2*Psize+j3;
-                    }
-                }
-            }
-        }
-    }
-    I[0] = count;
-}
-void Add_To_Bucket(long id, long *Iadd, uint32_t **Bucket, uint16_t *Bucket_max_size, uint16_t *Bucket_size){       //~2.0
+void Add_To_Bucket(long id, long *Iadd, uint32_t **Bucket, uint16_t *Bucket_max_size, uint16_t *Bucket_size){       
     for (long i = 1; i <= Iadd[0]; i++){
         if (Bucket_size[Iadd[i]] == Bucket_max_size[Iadd[i]]){
             Bucket[Iadd[i]] = (uint32_t *)realloc(Bucket[Iadd[i]], 4*(Bucket_max_size[Iadd[i]]+BUCKET_ENLARGE_SIZE));
@@ -463,7 +442,7 @@ void Add_To_Bucket(long id, long *Iadd, uint32_t **Bucket, uint16_t *Bucket_max_
         Bucket_size[Iadd[i]]++;
     }
 }
-void Rem_From_Bucket(long id, long *Irem, uint32_t **Bucket, uint16_t *Bucket_max_size, uint16_t *Bucket_size){     //~2.0
+void Rem_From_Bucket(long id, long *Irem, uint32_t **Bucket, uint16_t *Bucket_max_size, uint16_t *Bucket_size){     
     for (long i = 1; i <= Irem[0]; i++){
         for (long j = 0; j < Bucket_size[Irem[i]]; j++){
             if (Bucket[Irem[i]][j] == id){				
@@ -503,16 +482,14 @@ Vec<double> compute_coeff(float *v, double **b, long n){
     }
     /*Vec<double> coeff;
     coeff.SetLength(n);
-    for (long i = 0; i < n; i++){
-        coeff[i] = 0;
-    }
     for (long i = n-1; i >= 0; i--){
-        coeff[i] = (vv[i]/b[i][i]);
-        for (long j = 0; j <= i; j++){
+        coeff[i] = vv[i]/b[i][i];
+        for (long j = i; j >= 0; j--){
             vv[j] -= coeff[i]*b[i][j];
         }
-    }*/
-    return vv;
+    }
+    return coeff;*/
+	return vv;
 }
 
 /* an implementation of Gausssieve boosted by LSF, SimHash, Progressive Sieve,
@@ -521,13 +498,14 @@ Vec<double> compute_coeff(float *v, double **b, long n){
  * the same meaning in the paper https://eprint.iacr.org/2015/1128.pdf by Leo 
  * Ducas et al.*/
 void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float beta){
-    //srand(time(NULL));
+    srand(time(NULL));
     struct timeval start, end;
     double next_report = 5.0;
     gettimeofday(&start, NULL);
     long n = L.NumRows();
     long n8 = ((n+7)/8)*8;
     long n16 = ((n+15)/16)*16;
+
 
     /* compute the gso-data in RR. */
     RR::SetPrecision(150);
@@ -565,11 +543,11 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
     }
     for (long i = 0; i < n; i++){
         miu[i][i] = 1.0;
-        //b[i][i] = 1.0;
+       // b[i][i] = 1.0;
         B[i] = conv<double>(B_RR[i]);
         for (long j = 0; j < i; j++){
             miu[i][j] = conv<double>(miu_RR[i][j]);
-            //b[i][j] = miu[i][j];
+     //       b[i][j] = miu[i][j];
         }
     }
     /*for (long i = 0; i < n; i++){
@@ -583,13 +561,10 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
             b[i][j] = L[i][j];
         }
     }
-
     if (SHOW_DETAILS){
         cout << "gso is done! B = \n";
         printsqrt(B, n);
-        cout << "b = ";
-        print(b, n, n);
-        cout << "\n";
+        //print(b,n,n);
     }
 
 
@@ -612,9 +587,7 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
     float *sums = new float[NUM_COMPONENT];
 	float *minsums = new float[NUM_COMPONENT];
     if (SHOW_DETAILS){
-        cout << "Listdecode setup done! Psize = "<<Psize << ", component length = "<< m << ", Polytope vec = \n";
-        //print(Polytope, Psize, m);
-        //cout << endl;
+        cout << "Listdecode setup done! Psize = "<<Psize << ", component length = "<< m << "\n";
     }
 
     /* Bucketing setup. */
@@ -629,10 +602,6 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
     }
     uint16_t* Bucket_size = new uint16_t[num_buckets];
     uint16_t* Bucket_max_size = new uint16_t[num_buckets];
-    if ((Bucket_size == NULL) || (Bucket_max_size == NULL)){
-        cerr << "allocate of Bucket size failed...\n";
-        exit(1);
-    }
     for (long i = 0; i < num_buckets; i++){
         Bucket_size[i] = 0;
         Bucket_max_size[i] = BUCKET_INIT_SIZE;
@@ -642,10 +611,7 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
     long *Iadd = new long[num_buckets];
     long num_rel_buckets = 0;
     if (SHOW_DETAILS){
-        cout << "bucketing setup done! number of bucket = " << num_buckets <<endl;// ", Bucket size = \n";
-        //print(Bucket_size, num_buckets);
-        //cout << "Bucket max size = \n";
-        //print(Bucket_max_size, num_buckets);
+        cout << "bucketing setup done! number of bucket = " << num_buckets <<endl;
     }
 
     /* Simhash setup. */
@@ -656,11 +622,7 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
         compress_pos[i*4+2] = rand() % n;
         compress_pos[i*4+3] = rand() % n;
     }
-    if (SHOW_DETAILS){
-        //cout << "Simhash setup done! compress pos = \n";
-        //print(compress_pos, 128, 4);
-        //cout << endl;
-    }
+
 
     /* pool setup. */
     long vec_size = n16+16;
@@ -678,41 +640,33 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
     long num_used = 0;
     if (SHOW_DETAILS){
         cout << "pool setup done! num_used = "<< num_used << ", num_null_in_list = "<< num_null_in_list << ", num_empty = "<<num_empty<<endl;
-        //cout << "current list = \n";
-        //printvec(list, num_list);
-        //cout << "current update = \n";
-        //printvec(update, num_update);
-        //cout << endl;
     }
 
     
-
     /* main loop. */
-    float min_norm = 100000000;
+    float min_norm = 900000000;
     float* min_vec;
     long num_reduce = 0;
     long num_try_to_reduce = 0;
     long num_pass_Simhash = 0;
-    long current_dim = max(n-20, n);
+    long current_dim = max(n-30, 40);
     double gh = gh_coeff(current_dim);
     gh = gh * gh;
     for (long i = 0; i < current_dim; i++){
         gh = gh * pow(B[i], 1.0/(current_dim));
     }
-    long TimeStamp = 0;
+
     while ((current_dim <= n) && (num_used < max_vec-1)){
         /* do sampling.*/
         if (num_empty > 0){
             update[num_update] = empty[num_empty-1];
             num_empty--;
-            gaussian_sampling_on_dim(current_dim, update[num_update], n, b, miu, compress_pos, B);
-            //spherical_sampling(update[num_update], n);
+            gaussian_sampling_on_dim(current_dim, update[num_update], n, b, miu, compress_pos,B);
             num_update++;
         }else{
             update[num_update] = vec_start+vec_size*num_used;
             num_used++;
-            gaussian_sampling_on_dim(current_dim, update[num_update], n, b, miu, compress_pos, B);
-            //spherical_sampling(update[num_update], n);
+            gaussian_sampling_on_dim(current_dim, update[num_update], n, b, miu, compress_pos,B);
             num_update++;            
         }
 
@@ -720,10 +674,10 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
         while (num_update > 0){
             gettimeofday(&end, NULL);
             if ((end.tv_sec-start.tv_sec)+(double)(end.tv_usec-start.tv_usec)/1000000.0 > next_report){
-                next_report+=5.0;
-                cout << "reduce done! current sieving dimension = "<<current_dim <<"\n";
+                next_report+=5;
+                cout << "current sieving dimension = "<<current_dim <<"\n";
                 cout << "num_try_to_reduce = "<< num_try_to_reduce << ", num_pass_Simhash = "<< num_pass_Simhash << ", num_reduce = "<< num_reduce<< ", current min = "<<sqrt(min_norm) <<"\n"; 
-                cout << "shortest vec = "<< compute_coeff(min_vec, b, n) << endl;
+                //cout << "shortest vec = "<< compute_coeff(min_vec, b, n) << endl;
                 cout << "min_vec is reduced "<< *((long *)(&min_vec[-10]))<< " times\n";
                 cout << "TotalSize = " << TotalSize <<", num_used = "<< num_used << ", num_null_in_list = "<< num_null_in_list << ", num_empty = "<<num_empty<<endl<<endl;
             }
@@ -731,54 +685,22 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
             float *ptr = update[num_update-1];
             num_update--;
 
-            /* ListDecoding. */
-            ListDecode(rel_Buckets, ptr, n, m, Psize, Polytope, vec_tmp, InnerProd_tmp, Sort, beta, minsums, sums);
-            //cerr << rel_Buckets[0]<< " ";
-            /*if (SHOW_DETAILS){
-                cout << "new vec to deal, rel buckets = \n";
-                print_bucket(rel_Buckets);
-            }
-            if (rel_Buckets[0]<5){
-                num_update--;
-                empty[num_empty] = ptr;
-                num_empty++;
-                continue;
-            }*/
-            
-            /* reduce. */
-            TimeStamp++;
-            *((long *)(&ptr[-4])) = TimeStamp;
+
+            ListDecode(rel_Buckets, ptr, n, m, Psize, Polytope, vec_tmp, InnerProd_tmp, Sort, beta, minsums, sums);            
             num_rel_buckets = rel_Buckets[0];
+            //cerr << num_rel_buckets << " ";
             for (long i = 1; i <= num_rel_buckets; i++){
                 if (ptr_is_reduced) break;
-                for (long j = 0; j < Bucket_size[rel_Buckets[i]]; j++){     //1.51 │15e86:   test         %di,%di
-                    float *pptr = list[Bucket[rel_Buckets[i]][j]];          //2.06 │15ea4:   mov          -0x100(%rbp),%rax
-                                                                            //7.34 │15eb7:   mov          (%rax,%r13,8),%rbx
-                    if (pptr == NULL) continue;                             //1.28 │15ebb:   test         %rbx,%rbx
-                    if (*((long *)(&pptr[-4])) >= TimeStamp) continue;
-                    num_try_to_reduce++;                                    //6.73 │15ed5:   addq         $0x1,-0x120(%rbp) 
-                    *((long *)(&pptr[-4])) = TimeStamp;
+                for (long j = 0; j < Bucket_size[rel_Buckets[i]]; j++){     
+                    float *pptr = list[Bucket[rel_Buckets[i]][j]];   
+                    if ((long)pptr % 64) cerr << "warning ";    
+                    if (pptr == NULL) continue;                             
+                    num_try_to_reduce++;
                     long w = __builtin_popcountl((*((uint64_t *)(&ptr[-8]))) ^ (*((uint64_t *)(&pptr[-8]))));
                     w += __builtin_popcountl((*((uint64_t *)(&ptr[-6]))) ^ (*((uint64_t *)(&pptr[-6]))));
                     if (w < XOR_POPCNT_THRESHOLD || w > (128 - XOR_POPCNT_THRESHOLD)){
-                        num_pass_Simhash++;                                 //0.34 │15edd:   addq         $0x1,-0x128(%rbp)
-                        float x = dot(ptr, pptr, n16);                      //2.77 │15f76:   add          $0x8,%r13
-                                                                            //     │15f08:   vmovss       (%r14,%r13,4),%xmm11                                                                                                                                                         ▒
-                                                                            //0.64 │15f0e:   vmovss       0x4(%r14,%r13,4),%xmm14                                                                                                                                                      ▒
-                                                                            //0.01 │15f15:   vfmadd231ss  (%rbx,%r13,4),%xmm11,%xmm1                                                                                                                                                   ▒
-                                                                            //8.12 │15f1b:   vmovss       0x8(%r14,%r13,4),%xmm15                                                                                                                                                      ▒
-                                                                            //0.10 │15f22:   vfmadd231ss  0x4(%rbx,%r13,4),%xmm14,%xmm1                                                                                                                                                ▒
-                                                                            //2.44 │15f29:   vmovss       0xc(%r14,%r13,4),%xmm7                                                                                                                                                       ▒
-                                                                            //0.05 │15f30:   vfmadd231ss  0x8(%rbx,%r13,4),%xmm15,%xmm1                                                                                                                                                ▒
-                                                                            //2.49 │15f37:   vmovss       0x10(%r14,%r13,4),%xmm6                                                                                                                                                      ▒
-                                                                            //0.03 │15f3e:   vfmadd231ss  0xc(%rbx,%r13,4),%xmm7,%xmm1                                                                                                                                                 ▒
-                                                                            //2.72 │15f45:   vmovss       0x14(%r14,%r13,4),%xmm8                                                                                                                                                      ▒
-                                                                            //0.03 │15f4c:   vfmadd231ss  0x10(%rbx,%r13,4),%xmm6,%xmm1                                                                                                                                                ▒
-                                                                            //2.58 │15f53:   vmovss       0x18(%r14,%r13,4),%xmm5                                                                                                                                                      ▒
-                                                                            //0.03 │15f5a:   vfmadd231ss  0x14(%rbx,%r13,4),%xmm8,%xmm1                                                                                                                                                ▒
-                                                                            //2.76 │15f61:   vmovss       0x1c(%r14,%r13,4),%xmm0                                                                                                                                                      ▒
-                                                                            //0.02 │15f68:   vfmadd231ss  0x18(%rbx,%r13,4),%xmm5,%xmm1                                                                                                                                                ▒
-                                                                            //2.63 │15f6f:   vfmadd231ss  0x1c(%rbx,%r13,4),%xmm0,%xmm1
+                        num_pass_Simhash++;                                 
+                        float x = dot(ptr, pptr, n16);                  
                         float f = abs(x+x);
                         if (f > ptr[-1]){
                             num_reduce++;
@@ -786,11 +708,11 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                             if (x < 0){
                                 add(pptr, ptr, n16);
                             }else{
-                                min(pptr, ptr, n16);
+                                sub(pptr, ptr, n16);
                             }
-                            ((long *)(&pptr[-10]))[0]++;
-                            pptr[-1] = dot(pptr, pptr, n16);
-                            if (pptr[-1] < 1){
+                            ((long *)(&pptr[-10]))[0] += ((long *)(&ptr[-10]))[0]+1;
+                            pptr[-1] = dot(pptr, pptr, n16)+100.0;
+                            if (pptr[-1] < 200.0){
                                 if (x > 0){
                                     for (long i = 0; i < n; i++){
                                         pptr[i] = ptr[i];
@@ -803,7 +725,7 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                                 pptr[-1] = ptr[-1];
                                 empty[num_empty] = ptr;
                                 num_empty++;
-                                ptr_is_reduced = true;
+								ptr_is_reduced = true;
                                 break; 
                             }
                             if (pptr[-1] < min_norm) {
@@ -812,11 +734,6 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                             }
                             long id = Bucket[rel_Buckets[i]][j];
                             list[id] = NULL;
-                            if (SHOW_DETAILS){
-                                //cout << "vec "<< id <<" is reduced, current num rel buckets = "<<Irem[0]<<"\n";
-                                //cout << "vec "<< id <<" is reduced, current rel buckets = \n";
-                                //print_bucket(Irem);
-                            }
                             TotalSize -= Irem[0];
                             Rem_From_Bucket(id, Irem, Bucket, Bucket_max_size, Bucket_size);
                             compute_Simhash(pptr, compress_pos);
@@ -829,10 +746,10 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                             if (x < 0){
                                 add(ptr, pptr, n16);
                             }else{
-                                min(ptr, pptr, n16);
+                                sub(ptr, pptr, n16);
                             }
-                            ((long *)(&ptr[-10]))[0]++;
-                            ptr[-1] = dot(ptr, ptr, n16);
+                            ((long *)(&ptr[-10]))[0]+=((long *)(&pptr[-10]))[0]+1;
+                            ptr[-1] = dot(ptr, ptr, n16)+100.0;
                             if (ptr[-1] < min_norm) {
                                 min_norm = ptr[-1];
                                 min_vec = ptr;
@@ -852,39 +769,19 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                 }
                 compute_Simhash(ptr, compress_pos);
                 ListDecode(rel_Buckets, ptr, n, m, Psize, Polytope, vec_tmp, InnerProd_tmp, Sort, beta, minsums, sums);
-                TimeStamp++;
-                *((long *)(&ptr[-4])) = TimeStamp;
                 num_rel_buckets = rel_Buckets[0];
-                for (long i = 1; i <= num_rel_buckets; i++){                                //1.25 │1967b:   test         %r9w,%r9w 
+                for (long i = 1; i <= num_rel_buckets; i++){                                
                     if (ptr_is_reduced) break;
                     for (long j = 0; j < Bucket_size[rel_Buckets[i]]; j++){
-                        float *pptr = list[Bucket[rel_Buckets[i]][j]];                      //1.74 │19694:   mov          -0x100(%rbp),%r8
-                                                                                            //6.38 │196a7:   mov          (%r8,%rax,8),%rbx
-                        if (pptr == NULL) continue;                                         //1.24 │196ab:   test         %rbx,%rbx
-                        if (*((long *)(&pptr[-4])) >= TimeStamp) continue;
-                        num_try_to_reduce++;                                                //5.62 │196c5:   addq         $0x1,-0x120(%rbp)
-                        *((long *)(&pptr[-4])) = TimeStamp;
+                        float *pptr = list[Bucket[rel_Buckets[i]][j]];
+                        if ((long)pptr % 64) cerr << "warning ";                        
+                        if (pptr == NULL) continue;                                         
+                        num_try_to_reduce++;                                                
                         long w = __builtin_popcountl((*((uint64_t *)(&ptr[-8]))) ^ (*((uint64_t *)(&pptr[-8]))));
                         w += __builtin_popcountl((*((uint64_t *)(&ptr[-6]))) ^ (*((uint64_t *)(&pptr[-6]))));
                         if (w < XOR_POPCNT_THRESHOLD || w > (128 - XOR_POPCNT_THRESHOLD)){
-                            num_pass_Simhash++;                                             //0.35 │196cd:   addq         $0x1,-0x128(%rbp)
-                            float x = dot(ptr, pptr, n16);                                  //2.00 │19768:   add          $0x8,%r14
-                                                                                            //0.04 │196f9:   vmovss       0x0(%r13,%r14,4),%xmm4                                                                                                                                                       ▒
-                                                                                            //0.50 │19700:   vmovss       0x4(%r13,%r14,4),%xmm0                                                                                                                                                       ▒
-                                                                                            //0.02 │19707:   vfmadd231ss  (%rbx,%r14,4),%xmm4,%xmm8                                                                                                                                                    ▒
-                                                                                            //6.93 │1970d:   vmovss       0x8(%r13,%r14,4),%xmm10                                                                                                                                                      ▒
-                                                                                            //0.05 │19714:   vfmadd231ss  0x4(%rbx,%r14,4),%xmm0,%xmm8                                                                                                                                                 ▒
-                                                                                            //2.21 │1971b:   vmovss       0xc(%r13,%r14,4),%xmm9                                                                                                                                                       ▒
-                                                                                            //0.03 │19722:   vfmadd231ss  0x8(%rbx,%r14,4),%xmm10,%xmm8                                                                                                                                                ▒
-                                                                                            //2.05 │19729:   vmovss       0x10(%r13,%r14,4),%xmm12                                                                                                                                                     ▒
-                                                                                            //0.03 │19730:   vfmadd231ss  0xc(%rbx,%r14,4),%xmm9,%xmm8                                                                                                                                                 ▒
-                                                                                            //2.12 │19737:   vmovss       0x14(%r13,%r14,4),%xmm11                                                                                                                                                     ▒
-                                                                                            //0.04 │1973e:   vfmadd231ss  0x10(%rbx,%r14,4),%xmm12,%xmm8                                                                                                                                               ▒
-                                                                                            //2.11 │19745:   vmovss       0x18(%r13,%r14,4),%xmm14                                                                                                                                                     ▒
-                                                                                            //0.07 │1974c:   vfmadd231ss  0x14(%rbx,%r14,4),%xmm11,%xmm8                                                                                                                                               ▒
-                                                                                            //2.00 │19753:   vmovss       0x1c(%r13,%r14,4),%xmm15                                                                                                                                                     ▒
-                                                                                            //0.03 │1975a:   vfmadd231ss  0x18(%rbx,%r14,4),%xmm14,%xmm8                                                                                                                                               ▒
-                                                                                            //2.11 │19761:   vfmadd231ss  0x1c(%rbx,%r14,4),%xmm15,%xmm8
+                            num_pass_Simhash++;                                             
+                            float x = dot(ptr, pptr, n16);                                  
                             float f = abs(x+x);
                             if (f > ptr[-1]){
                                 num_reduce++;
@@ -892,11 +789,11 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                                 if (x < 0){
                                     add(pptr, ptr, n16);
                                 }else{
-                                    min(pptr, ptr, n16);
+                                    sub(pptr, ptr, n16);
                                 }
-                                ((long *)(&pptr[-10]))[0]++;
-                                pptr[-1] = dot(pptr, pptr, n16);
-                                if (pptr[-1] < 1){
+                                ((long *)(&pptr[-10]))[0]+=((long *)(&ptr[-10]))[0]+1;
+                                pptr[-1] = dot(pptr, pptr, n16)+100.0;
+                                if (pptr[-1] < 200.0){
                                     if (x > 0){
                                         for (long i = 0; i < n; i++){
                                             pptr[i] = ptr[i];
@@ -909,7 +806,7 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                                     pptr[-1] = ptr[-1];
                                     empty[num_empty] = ptr;
                                     num_empty++;
-                                    ptr_is_reduced = true;
+									ptr_is_reduced = true;
                                     break; 
                                 }
                                 if (pptr[-1] < min_norm) {
@@ -918,11 +815,6 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                                 }
                                 long id = Bucket[rel_Buckets[i]][j];
                                 list[id] = NULL;
-                                if (SHOW_DETAILS){
-                                    //cout << "vec "<< id <<" is reduced, current num rel buckets = "<<Irem[0]<<"\n";
-                                    //cout << "vec "<< id <<" is reduced, current rel buckets = \n";
-                                    //print_bucket(Irem);
-                                }
                                 TotalSize -= Irem[0];
                                 Rem_From_Bucket(id, Irem, Bucket, Bucket_max_size, Bucket_size);
                                 compute_Simhash(pptr, compress_pos);
@@ -935,10 +827,10 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                                 if (x < 0){
                                     add(ptr, pptr, n16);
                                 }else{
-                                    min(ptr, pptr, n16);
+                                    sub(ptr, pptr, n16);
                                 }
-                                ((long *)(&ptr[-10]))[0]++;
-                                ptr[-1] = dot(ptr, ptr, n16);
+                                ((long *)(&ptr[-10]))[0]+=((long *)(&pptr[-10]))[0]+1;
+                                ptr[-1] = dot(ptr, ptr, n16)+100.0;
                                 if (ptr[-1] < min_norm) {
                                     min_norm = ptr[-1];
                                     min_vec = ptr;
@@ -954,7 +846,6 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                 }
             }
             if (!ptr_is_reduced){
-                //ListDecode(Iadd, ptr, n, m, Psize, Polytope, vec_tmp, InnerProd_tmp, Sort, alpha, minsums, sums);
                 long id;
                 if (num_null_in_list > 0){
                     num_null_in_list--;
@@ -963,37 +854,23 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
                     id = num_list;
                     num_list++;
                 }
-                if (SHOW_DETAILS){
-                    //cout << "vec "<< id <<" is add to pool, num rel buckets = "<<rel_Buckets[0]<<"\n";
-                    //cout << "vec "<< id <<" is add to pool, rel buckets = \n";
-                    //print_bucket(rel_Buckets);
-                }
                 list[id] = NULL;
                 Add_To_Bucket(id, rel_Buckets, Bucket, Bucket_max_size, Bucket_size);
                 TotalSize+=rel_Buckets[0];
                 list[id] = ptr;
             }
         }
-        if (false){
-            cout << "reduce done! current sieving dimension = "<<current_dim <<", current list = \n";
-            printvec(list, num_list);
-            cout << "current update = \n";
-            printvec(update, num_update);
-            cout << "num_try_to_reduce = "<< num_try_to_reduce << ", num_pass_Simhash = "<< num_pass_Simhash << ", num_reduce = "<< num_reduce<< ", current min = "<<sqrt(min_norm) <<"\n";
-            cout << "TotalSize = " << TotalSize <<", num_used = "<< num_used << ", num_null_in_list = "<< num_null_in_list << ", num_empty = "<<num_empty<<endl<<endl;
-        }
-        if (sieve_is_over(current_dim, list, num_list, n, B, gh)||(min_norm<1885*1885)){
-            current_dim++;
+        if (sieve_is_over(current_dim, list, num_list, n, B, gh)){
+            if (current_dim == n){
+                current_dim++;
+            }else{
+                current_dim = min(current_dim+1, n);
+            }
+
+
         }
     }
     if (true){
-        //cout << "reduce done! current sieving dimension = "<<current_dim <<", current list = \n";
-        //printvec(list, num_list);
-        //cout << "current update = \n";
-        //printvec(update, num_update);
-        for (long i = 0; i < 51*51*51; i+=100){
-            cout << Bucket_size[i] << " ";
-        }
         cout << "shortest vec = "<< compute_coeff(min_vec, b, n) << endl;
         cout << "min_vec is reduced "<< *((long *)(&min_vec[-10]))<< " times\n";
         cout << "num_try_to_reduce = "<< num_try_to_reduce << ", num_pass_Simhash = "<< num_pass_Simhash << ", num_reduce = "<< num_reduce<< ", current min = "<<sqrt(min_norm) <<"\n";
@@ -1032,9 +909,9 @@ void LDGaussSieve(Mat<double>& L, long max_vec, long Psize, float alpha, float b
 
 
 int main(){
-    ifstream data("../Leo/LDSieve/challenges/dim51sd0-LLL.txt", ios::in);
+    ifstream data("../Leo/LDSieve/challenges/dim69sd0-LLL.txt", ios::in);
     Mat<double> L;
     data >> L;
-    LDGaussSieve(L, 30000, 51, 0.44, 0.44);
+    LDGaussSieve(L, 1000000, 124, 0.44, 0.44);
     return 0;
 }
