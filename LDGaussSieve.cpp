@@ -1327,19 +1327,19 @@ void work(long& current_dim, long max_vec, long Psize, bool check_dim_up, float 
             if (last_num_used % 50 == 0){
                 if (sieve_is_over(current_dim, gh)){
                     if (current_dim == n){
-						if (goal >0.1){
-							if (sqrt(min_norm)<goal+1){
-								current_dim++;
-							}
-						}
+			if (goal >0.1){
+			    if (sqrt(min_norm)<goal+1){
+				current_dim++;
+			    }
+			}
                         else{
-							current_dim++;
-						}
+			    current_dim++;
+			}
                     }else{
                         current_dim = min(current_dim+2, n);
                         cerr << "dim up to "<<current_dim<< ", gh = "<<sqrt(gh)<<endl;
                     }
-		        }
+		}
             }
         }  
     }
@@ -1410,7 +1410,7 @@ int main(int argc,char *argv[]){
     long begin_ind;
     long upper_ind;
     long max_vec;
-	float goal;
+    float goal;
     cout << "plz cin the begin_index...\n";
     cin >> begin_ind;
     cout << "plz cin the upper_index...\n";
@@ -1419,8 +1419,8 @@ int main(int argc,char *argv[]){
     cin >> Psize;
     cout << "plz cin num_threads...\n";
     cin >> num_threads;
-	cout << "plz cin the goal\n";
-	cin >> goal;
+    cout << "plz cin the goal\n";
+    cin >> goal;
     cout << "plz cin alpha...\n";
     cin >> alpha_;
     cout << "plz cin beta...\n";
@@ -1428,7 +1428,7 @@ int main(int argc,char *argv[]){
     cout << "plz cin max_vec...\n";
     cin >> max_vec;
     //LDGaussSieve(L, 0, L.NumRows(), 200000, Psize, 0.44,0.44,num_threads, goal);
-    LDGaussSieve(L, begin_ind, upper_ind, max_vec, Psize,alpha_,beta_,num_threads);
+    LDGaussSieve(L, begin_ind, upper_ind, max_vec, Psize,alpha_,beta_,num_threads,goal);
     return 0;
 }
 
