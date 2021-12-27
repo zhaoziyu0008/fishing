@@ -16,8 +16,8 @@ NVSieve: NVSieve.cpp
 LayerSieve: LayerSieve.cpp
 	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o LayerSieve
 
-SubSieve: SubSieve.cpp
-	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o SubSieve
+nSieve: nSieve.cpp
+	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o nSieve
 
 LDGaussSieve: LDGaussSieve.cpp
 	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o LDGaussSieve
