@@ -15,6 +15,7 @@ using namespace NTL;
 #define BUCKET_INIT_SIZE 7
 #define BUCKET_ENLARGE_SIZE 3
 #define XOR_POPCNT_THRESHOLD 50
+#define ENTER_POOL_THRESHOLD 5
 #define deux28 (((long long) 2) << 28)
 
 #define SHOW_DETAILS true
@@ -48,7 +49,7 @@ uint32_t** Bucket;
 uint16_t* Bucket_size;
 uint16_t* Bucket_max_size;
 long num_buckets;
-long TotalSize;
+atomic<long> TotalSize(0);
 
 //Simhash setup
 uint32_t* compress_pos;
@@ -61,7 +62,7 @@ float *vec_store;
 float *vec_start;
 float **empty;
 float **update;
-long num_used;
+atomic<long> num_used(0);
 long num_empty;
 long num_update;
 
@@ -165,6 +166,15 @@ void print_vec(float *a){
     cout << a[vec_length-1]<<"]\n";
     short *x = (short *)(&a[-int_bias]);
     cout << "length = "<<a[-1]<<", Status = "<<*((uint64_t *)(&a[-4])) << ", SimHash = ["<< *((uint64_t *)(&a[-8])) << " " <<*((uint64_t *)(&a[-6]))<<"], ";
+    cout << "coeff = [";
+    for (long i = 0; i < n-1; i++){
+            cout << x[i]<<" ";
+    }
+    cout << x[n-1]<<"]\n";
+}
+void print_result(float *a){
+    short *x = (short *)(&a[-int_bias]);
+    cout << "length = "<<sqrt(a[-1])<<", Status = "<<*((uint64_t *)(&a[-4])) << ", SimHash = ["<< *((uint64_t *)(&a[-8])) << " " <<*((uint64_t *)(&a[-6]))<<"], ";
     cout << "coeff = [";
     for (long i = 0; i < n-1; i++){
             cout << x[i]<<" ";
@@ -525,6 +535,16 @@ void compute_vec(float *res){
     compute_Simhash(res);
     res[-1] = norm(res, vec_length)+100.0;
 }
+void mmo(float *res){
+    short *x = (short *)(&res[-int_bias]);
+    for (long i = 0; i < n; i++){
+        x[i] = -x[i];
+    }
+    for (long i = 0; i < vec_length; i++){
+        res[i] = -res[i];
+    }
+    compute_Simhash(res);
+}
 
 
 /*----------------------sampling----------------------*/
@@ -736,7 +756,7 @@ void Bucketing_setup(long Psize){
 	for (int i = 0; i < NUM_COMPONENT; i++){
 		num_buckets*=Psize;
 	}
-    TotalSize = 0;
+    //TotalSize = 0;
     Bucket = new uint32_t*[num_buckets];
     for (long i = 0; i < num_buckets; i++){
         Bucket[i] = new uint32_t[BUCKET_INIT_SIZE];
@@ -789,7 +809,6 @@ void pool_setup(long max_vec){
     update = (float **) malloc (8*max_vec);
     num_update = 0;
     num_empty = 0;
-    num_used = 0;
 
     if (SHOW_DETAILS){
         cout << "pool_setup done!\n";
@@ -965,31 +984,35 @@ void ListDecode(long *I, long *In, float *ptr, long Psize, float *vec_tmp, float
         }   
     }
 }
-void Add_To_Bucket(long id, long *Iadd){     
+void Add_To_Bucket(long id, long *Iadd){  
+    pthread_spin_lock(&Bucket_lock);
     for (long i = 1; i <= Iadd[0]; i++){
-        if (Bucket_size[Iadd[i]] == Bucket_max_size[Iadd[i]]){
+        if (Bucket_size[Iadd[i]] == Bucket_max_size[Iadd[i]]){ 
             Bucket[Iadd[i]] = (uint32_t *)realloc(Bucket[Iadd[i]], 4*(Bucket_max_size[Iadd[i]]+BUCKET_ENLARGE_SIZE));
             Bucket_max_size[Iadd[i]] += BUCKET_ENLARGE_SIZE;
         }
         Bucket[Iadd[i]][Bucket_size[Iadd[i]]] = id;
         Bucket_size[Iadd[i]]++;
     }
+    pthread_spin_unlock(&Bucket_lock);
 }
-void Rem_From_Bucket(long id, long *Irem){     
+void Rem_From_Bucket(long id, long *Irem){
+    pthread_spin_lock(&Bucket_lock);       
     for (long i = 1; i <= Irem[0]; i++){
         for (long j = 0; j < Bucket_size[Irem[i]]; j++){
-            if (Bucket[Irem[i]][j] == id){				
-                Bucket[Irem[i]][j] = Bucket[Irem[i]][Bucket_size[Irem[i]]-1];
-                Bucket_size[Irem[i]]--;
+            if (Bucket[Irem[i]][j] == id){	
+                Bucket_size[Irem[i]]--;			
+                Bucket[Irem[i]][j] = Bucket[Irem[i]][Bucket_size[Irem[i]]];
                 break;
             }
         }
     }
+    pthread_spin_unlock(&Bucket_lock);   
 }
-void work(long& current_dim, long max_vec, long Psize, bool check_dim_up){
+void work(long& current_dim, long max_vec, long Psize, bool check_dim_up, float goal){
     struct timeval start, end;
     gettimeofday(&start, NULL);
-    double next_report = 5.0;
+    double next_report = REPORT_INTERVAL;
 
     double gh;
     long last_num_used;
@@ -999,14 +1022,15 @@ void work(long& current_dim, long max_vec, long Psize, bool check_dim_up){
         for (long i = 0; i < current_dim; i++){
             gh = gh * pow(B[i], 1.0/current_dim);
         }
-        last_num_used = num_used;
+        last_num_used = 0;
     }
     __attribute__ ((aligned (64))) float tmp_store[vec_size];
     float* tmp = &tmp_store[int_bias];
     float* InnerProd_tmp_store = new float[NUM_COMPONENT*Psize+16];
     float* InnerProd_tmp = (float *) ((((long long)(InnerProd_tmp_store)-1)/64+1)*64);
     long long* Sort = new long long[NUM_COMPONENT*Psize+16];
-    float* vec_tmp = new float[vec_length];
+    float* vec_tmp_store = new float[vec_length+16];
+    float* vec_tmp = (float *) ((((long long)(vec_tmp_store)-1)/64+1)*64);
     float *sums = new float[NUM_COMPONENT];
 	float *minsums = new float[NUM_COMPONENT];
     long *rel_Buckets = new long[num_buckets];
@@ -1016,39 +1040,61 @@ void work(long& current_dim, long max_vec, long Psize, bool check_dim_up){
         if (num_update==0){
             gaussian_sampling_on_dim(current_dim, tmp);
             float *res;
+            pthread_spin_lock(&empty_lock);
             if (num_empty > 0){
                 res = empty[num_empty-1];
                 num_empty--;
+                pthread_spin_unlock(&empty_lock);
+                pthread_spin_lock(&pool_lock);
+                copy_vec(res, tmp);
+                pthread_spin_unlock(&pool_lock);
             }else{
+                pthread_spin_unlock(&empty_lock);
+                pthread_spin_lock(&pool_lock);
                 res = vec_start+vec_size*num_used;
                 num_used++;
+                copy_vec(res, tmp);
+                pthread_spin_unlock(&pool_lock);
             }
-            copy_vec(res, tmp);
+            pthread_spin_lock(&update_lock);
             update[num_update] = res;
             num_update++;
+            pthread_spin_unlock(&update_lock);
         }
-        while (num_update > 0){
-            gettimeofday(&end, NULL);
-            if ((end.tv_sec-start.tv_sec)+(double)(end.tv_usec-start.tv_usec)/1000000.0 > next_report){
-                next_report+=5;
-                cout << "current sieving dimension = "<<current_dim <<"\n";
-                cout << "num_try_to_reduce = "<< num_try_to_reduce << ", num_pass_Simhash = "<< num_pass_Simhash << ", num_reduce = "<< num_reduce<< ", current min = "<<sqrt(min_norm) <<"\n"; 
-                cout << "shortest vec = ";
-                if (min_vec) print_vec(min_vec);
-                cout << "TotalSize = " << TotalSize <<", num_used = "<< num_used << ", num_empty = "<<num_empty<<endl<<endl;
+        while (true){
+            pthread_spin_lock(&update_lock);
+            float *ptr;
+            if (num_update > 0){
+                ptr = update[num_update-1];
+                num_update--;
+                pthread_spin_unlock(&update_lock);
+            }else{
+                pthread_spin_unlock(&update_lock);
+                break;
             }
-            float *ptr = update[num_update-1];
-            num_update--;
+            
             bool ptr_is_reduced = false;
             ListDecode(rel_Buckets, nrel_Buckets, ptr, Psize, vec_tmp, InnerProd_tmp, Sort, beta, minsums, sums);
             long num_rel_buckets = rel_Buckets[0];
             long num_nrel_buckets = nrel_Buckets[0];
-
+            if (num_rel_buckets < ENTER_POOL_THRESHOLD){
+                if (num_nrel_buckets < ENTER_POOL_THRESHOLD){
+                    if (current_dim<n){
+                        pthread_spin_lock(&empty_lock);
+                        empty[num_empty] = ptr;
+                        num_empty++;
+                        pthread_spin_unlock(&empty_lock);
+                        continue;
+                    }
+                }
+            }
             for (long i = 1; i <= num_rel_buckets; i++){
                 if (ptr_is_reduced) break;
                 long ii = rel_Buckets[i];
                 for (long j = 0; j < Bucket_size[ii]; j++){
-                    float *pptr = vec_start+vec_size*Bucket[ii][j];
+                    uint32_t ud = Bucket[ii][j];
+                    if (ud > num_used) continue;
+                    float *pptr = vec_start+vec_size*ud;
                     num_try_to_reduce++;
                     long w = __builtin_popcountl((*((uint64_t *)(&ptr[-8]))) ^ (*((uint64_t *)(&pptr[-8]))));
                     w += __builtin_popcountl((*((uint64_t *)(&ptr[-6]))) ^ (*((uint64_t *)(&pptr[-6]))));
@@ -1058,46 +1104,89 @@ void work(long& current_dim, long max_vec, long Psize, bool check_dim_up){
                         float x = dot(ptr, pptr, vec_length);                  
                         float f = abs(x+x);
                         if (f > ptr[-1]){
-                            tmp[-1] = pptr[-1] + ptr[-1] - f;
-                            if (tmp[-1] < 500.0){
-                                empty[num_empty] = ptr;
-                                num_empty++;
-                                ptr_is_reduced = true;
-                                break;
-                            }
-                            num_reduce++;
-                            ListDecode(Irem, NULL, pptr, Psize, vec_tmp, InnerProd_tmp, Sort, alpha, minsums, sums);
                             if (x < 0){
                                 add_coeff(tmp, pptr, ptr);
                             }else{
                                 sub_coeff(tmp, pptr, ptr);
                             }
-                            compute_vec(tmp);                            
-                            copy_vec(pptr, tmp);
-                            uint32_t id = Bucket[ii][j];
-                            Rem_From_Bucket(id, Irem);
-                            if (pptr[-1] < min_norm) {
-                                min_norm = pptr[-1];
-                                min_vec = pptr;
+                            tmp[-1] = pptr[-1] + ptr[-1] - f;
+                            if (tmp[-1] < 500.0){
+                                pthread_spin_lock(&pool_lock);
+                                if (*((uint64_t *)(&pptr[-4])) == 0){
+                                    pthread_spin_unlock(&pool_lock);
+                                    pthread_spin_lock(&empty_lock);
+                                    empty[num_empty] = ptr;
+                                    num_empty++;
+                                    pthread_spin_unlock(&empty_lock);
+                                    ptr_is_reduced = true;
+                                    break;
+                                }else{
+                                    pthread_spin_unlock(&pool_lock);
+                                    continue;
+                                }
                             }
+                            num_reduce++;
+                            compute_vec(tmp);
+                            ListDecode(Irem, NULL, pptr, Psize, vec_tmp, InnerProd_tmp, Sort, alpha, minsums, sums);
+                            uint32_t id = (long)(pptr-vec_start);
+                            pthread_spin_lock(&pool_lock);
+                            if (*((uint64_t *)(&pptr[-4]))==0){
+                                copy_vec(pptr, tmp);
+                                pthread_spin_unlock(&pool_lock);
+                            }else{
+                                pthread_spin_unlock(&pool_lock);
+                                continue;
+                            }
+                            id/=vec_size;
+                            Rem_From_Bucket(id, Irem); 
                             TotalSize -= Irem[0];
+                            if (pptr[-1] < min_norm) {
+                                pthread_spin_lock(&min_lock);
+                                if (pptr[-1]<min_norm){
+                                    min_norm = pptr[-1];
+                                    min_vec = pptr;
+                                }
+                                pthread_spin_unlock(&min_lock);
+                                if (min_norm < 10000){
+                                    cout << "warning\n";
+                                }                           
+                            }
+                            pthread_spin_lock(&update_lock);
                             update[num_update] = pptr;
                             num_update++;
+                            pthread_spin_unlock(&update_lock);
+                            
                         }else if (f > pptr[-1]){
-                            num_reduce++;
                             if (x < 0){
                                 add_coeff(tmp, ptr, pptr);
                             }else{
                                 sub_coeff(tmp, ptr, pptr);
                             }
+                            num_reduce++;
                             compute_vec(tmp);
-                            copy_vec(ptr, tmp);
-                            if (ptr[-1] < min_norm) {
-                                min_norm = ptr[-1];
-                                min_vec = ptr;
+                            pthread_spin_lock(&pool_lock);
+                            if (*((uint64_t *)(&pptr[-4]))){
+                                pthread_spin_unlock(&pool_lock);
+                                continue;
+                            }else{
+                                copy_vec(ptr, tmp);
+                                pthread_spin_unlock(&pool_lock);
                             }
+                            if (ptr[-1] < min_norm) {
+                                pthread_spin_lock(&min_lock);
+                                if (ptr[-1]<min_norm){
+                                    min_norm = ptr[-1];
+                                    min_vec = ptr;
+                                }
+                                pthread_spin_unlock(&min_lock);
+                                if (min_norm < 10000){
+                                    cout << "warning\n";
+                                }
+                            }
+                            pthread_spin_lock(&update_lock);
                             update[num_update] = ptr;
                             num_update++;
+                            pthread_spin_unlock(&update_lock);
                             ptr_is_reduced = true;
                             break;
                         }
@@ -1108,7 +1197,9 @@ void work(long& current_dim, long max_vec, long Psize, bool check_dim_up){
                 if (ptr_is_reduced) break;
                 long ii = nrel_Buckets[i];
                 for (long j = 0; j < Bucket_size[ii]; j++){
-                    float *pptr = vec_start+vec_size*Bucket[ii][j];
+                    uint32_t ud = Bucket[ii][j];
+                    if (ud > num_used) continue;
+                    float *pptr = vec_start+vec_size*ud;
                     num_try_to_reduce++;
                     long w = __builtin_popcountl((*((uint64_t *)(&ptr[-8]))) ^ (*((uint64_t *)(&pptr[-8]))));
                     w += __builtin_popcountl((*((uint64_t *)(&ptr[-6]))) ^ (*((uint64_t *)(&pptr[-6]))));
@@ -1118,46 +1209,89 @@ void work(long& current_dim, long max_vec, long Psize, bool check_dim_up){
                         float x = dot(ptr, pptr, vec_length);                  
                         float f = abs(x+x);
                         if (f > ptr[-1]){
-                            tmp[-1] = pptr[-1] + ptr[-1] - f;
-                            if (tmp[-1] < 500.0){
-                                empty[num_empty] = ptr;
-                                num_empty++;
-                                ptr_is_reduced = true;
-                                break;
-                            }
-                            num_reduce++;
-                            ListDecode(Irem, NULL, pptr, Psize, vec_tmp, InnerProd_tmp, Sort, alpha, minsums, sums);
                             if (x < 0){
                                 add_coeff(tmp, pptr, ptr);
                             }else{
                                 sub_coeff(tmp, pptr, ptr);
                             }
-                            compute_vec(tmp);
-                            copy_vec(pptr, tmp);
-                            uint32_t id = Bucket[ii][j];
-                            Rem_From_Bucket(id, Irem);
-                            if (pptr[-1] < min_norm) {
-                                min_norm = pptr[-1];
-                                min_vec = pptr;
+                            tmp[-1] = pptr[-1] + ptr[-1] - f;
+                            if (tmp[-1] < 500.0){
+                                pthread_spin_lock(&pool_lock);
+                                if (*((uint64_t *)(&pptr[-4])) == 0){
+                                    pthread_spin_unlock(&pool_lock);
+                                    pthread_spin_lock(&empty_lock);
+                                    empty[num_empty] = ptr;
+                                    num_empty++;
+                                    pthread_spin_unlock(&empty_lock);
+                                    ptr_is_reduced = true;
+                                    break;
+                                }else{
+                                    pthread_spin_unlock(&pool_lock);
+                                    continue;
+                                }
                             }
+                            num_reduce++;
+                            compute_vec(tmp);
+                            ListDecode(Irem, NULL, pptr, Psize, vec_tmp, InnerProd_tmp, Sort, alpha, minsums, sums);
+                            uint32_t id = (long)(pptr-vec_start);
+                            pthread_spin_lock(&pool_lock);
+                            if (*((uint64_t *)(&pptr[-4]))==0){
+                                copy_vec(pptr, tmp);
+                                pthread_spin_unlock(&pool_lock);
+                            }else{
+                                pthread_spin_unlock(&pool_lock);
+                                continue;
+                            }
+                            id/=vec_size;
+                            Rem_From_Bucket(id, Irem); 
                             TotalSize -= Irem[0];
+                            if (pptr[-1] < min_norm) {
+                                pthread_spin_lock(&min_lock);
+                                if (pptr[-1]<min_norm){
+                                    min_norm = pptr[-1];
+                                    min_vec = pptr;
+                                }
+                                pthread_spin_unlock(&min_lock);
+                                if (min_norm < 10000){
+                                    cout << "warning\n";
+                                }                           
+                            }
+                            pthread_spin_lock(&update_lock);
                             update[num_update] = pptr;
                             num_update++;
+                            pthread_spin_unlock(&update_lock);
+                            
                         }else if (f > pptr[-1]){
-                            num_reduce++;
                             if (x < 0){
                                 add_coeff(tmp, ptr, pptr);
                             }else{
                                 sub_coeff(tmp, ptr, pptr);
                             }
+                            num_reduce++;
                             compute_vec(tmp);
-                            copy_vec(ptr, tmp);
-                            if (ptr[-1] < min_norm) {
-                                min_norm = ptr[-1];
-                                min_vec = ptr;
+                            pthread_spin_lock(&pool_lock);
+                            if (*((uint64_t *)(&pptr[-4]))){
+                                pthread_spin_unlock(&pool_lock);
+                                continue;
+                            }else{
+                                copy_vec(ptr, tmp);
+                                pthread_spin_unlock(&pool_lock);
                             }
+                            if (ptr[-1] < min_norm) {
+                                pthread_spin_lock(&min_lock);
+                                if (ptr[-1]<min_norm){
+                                    min_norm = ptr[-1];
+                                    min_vec = ptr;
+                                }
+                                pthread_spin_unlock(&min_lock);
+                                if (min_norm < 10000){
+                                    cout << "warning\n";
+                                }
+                            }
+                            pthread_spin_lock(&update_lock);
                             update[num_update] = ptr;
                             num_update++;
+                            pthread_spin_unlock(&update_lock);
                             ptr_is_reduced = true;
                             break;
                         }
@@ -1167,42 +1301,67 @@ void work(long& current_dim, long max_vec, long Psize, bool check_dim_up){
             if (!ptr_is_reduced){
                 long id = (long)(ptr-vec_start);
                 id /= vec_size;
-                Add_To_Bucket(id, rel_Buckets);
+                if (rel_Buckets[0] < ENTER_POOL_THRESHOLD){
+                    mmo(ptr);
+                    Add_To_Bucket(id, nrel_Buckets);
+                    TotalSize+=nrel_Buckets[0];
+                }else{
+                    Add_To_Bucket(id, rel_Buckets);
+                    TotalSize+=rel_Buckets[0];
+                }
+                
                 *((uint64_t *)(&ptr[-4])) = 0;
-                TotalSize+=rel_Buckets[0];
             }
         }
         if (check_dim_up){
-            if (last_num_used < num_used - 100){
-                last_num_used = num_used;
+            gettimeofday(&end, NULL);
+            if ((end.tv_sec-start.tv_sec)+(double)(end.tv_usec-start.tv_usec)/1000000.0 > next_report){
+                next_report+=REPORT_INTERVAL;
+                cout << "current sieving dimension = "<<current_dim <<"\n";
+                cout << "num_try_to_reduce = "<< num_try_to_reduce << ", num_pass_Simhash = "<< num_pass_Simhash << ", num_reduce = "<< num_reduce<< ", current min = "<<sqrt(min_norm) <<"\n"; 
+                cout << "shortest vec = ";
+                if (min_vec) print_vec(min_vec);
+                cout << "TotalSize = " << TotalSize <<", num_used = "<< num_used << ", num_empty = "<<num_empty<<endl<<endl;
+            }
+            last_num_used++;
+            if (last_num_used % 50 == 0){
                 if (sieve_is_over(current_dim, gh)){
                     if (current_dim == n){
-                        current_dim++;
+						if (goal >0.1){
+							if (sqrt(min_norm)<goal+1){
+								current_dim++;
+							}
+						}
+                        else{
+							current_dim++;
+						}
                     }else{
                         current_dim = min(current_dim+2, n);
+                        cerr << "dim up to "<<current_dim<< ", gh = "<<sqrt(gh)<<endl;
                     }
-                    cerr << "dim up to "<<current_dim<< ", gh = "<<sqrt(gh)<<endl;
-                }
+		        }
             }
         }  
     }
-
-    gettimeofday(&end, NULL);
-    cout << "total time = "<<(end.tv_sec-start.tv_sec)+(double)(end.tv_usec-start.tv_usec)/1000000.0<<"s"<<endl;
+    if (check_dim_up){
+        gettimeofday(&end, NULL);
+        cout << "total time = "<<(end.tv_sec-start.tv_sec)+(double)(end.tv_usec-start.tv_usec)/1000000.0<<"s"<<endl;
+    }
+    
 
     delete[] rel_Buckets;
     delete[] nrel_Buckets;
     delete[] Irem;
     delete[] InnerProd_tmp_store;
     delete[] Sort;
-    delete[] vec_tmp;
+    delete[] vec_tmp_store;
     delete[] sums;
     delete[] minsums;
 }
 
 
 /* Sieving on interval [begin_index, upper_index). */
-void LDGaussSieve(Mat<double>& L, long begin_index, long upper_index, long max_vec, long Psize, float alpha_, float beta_, long num_threads){
+void LDGaussSieve(Mat<double>& L, long begin_index, long upper_index, long max_vec, long Psize, float alpha_, float beta_, long num_threads, float goal){
     //srand(time(NULL));
     n = upper_index-begin_index;
     if (n % NUM_COMPONENT) {
@@ -1227,22 +1386,49 @@ void LDGaussSieve(Mat<double>& L, long begin_index, long upper_index, long max_v
 
     long current_dim = 40;
     thread worker[num_threads];
-    worker[0] = thread(work, ref(current_dim), max_vec, Psize, true);
+    worker[0] = thread(work, ref(current_dim), max_vec, Psize, true, goal);
     for (long i = 1; i < num_threads; i++){
-        worker[i] = thread(work, ref(current_dim), max_vec, Psize, false);
+        worker[i] = thread(work, ref(current_dim), max_vec, Psize, false,goal);
     }
     for (long i = 0; i < num_threads; i++){
         worker[i].join();
     }
+    cout << "shortest_vec found is ";
+    print_result(min_vec);
 
     clear_all();
 }
 
-int main(){
-    ifstream data("dim60sd0-LLL.txt", ios::in);
+int main(int argc,char *argv[]){
+    ifstream data(argv[1], ios::in);
     Mat<double> L;
     data >> L;
-    LDGaussSieve(L, 0, 60, 1000000, 80, 0.44, 0.44, 1);
+    long Psize;
+    long num_threads;
+    float alpha_;
+    float beta_;
+    long begin_ind;
+    long upper_ind;
+    long max_vec;
+	float goal;
+    cout << "plz cin the begin_index...\n";
+    cin >> begin_ind;
+    cout << "plz cin the upper_index...\n";
+    cin >> upper_ind;
+    cout << "plz cin the Psize...\n";
+    cin >> Psize;
+    cout << "plz cin num_threads...\n";
+    cin >> num_threads;
+	cout << "plz cin the goal\n";
+	cin >> goal;
+    cout << "plz cin alpha...\n";
+    cin >> alpha_;
+    cout << "plz cin beta...\n";
+    cin >> beta_;
+    cout << "plz cin max_vec...\n";
+    cin >> max_vec;
+    //LDGaussSieve(L, 0, L.NumRows(), 200000, Psize, 0.44,0.44,num_threads, goal);
+    LDGaussSieve(L, begin_ind, upper_ind, max_vec, Psize,alpha_,beta_,num_threads);
     return 0;
 }
 
