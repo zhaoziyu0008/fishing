@@ -27,8 +27,8 @@ NVSieve.o: NVSieve.cpp
 3Sieve.o: 3Sieve.cpp
 	$(CXX) $(CFLAGS) $^ $(LIBDIR) $(TOOLCHAINS) -c
 
-BoostedSieve.o: BoostedSieve.cpp
-	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -c
+#BoostedSieve.o: BoostedSieve.cpp
+#	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -c
 
 #nSieve: nSieve.cpp
 #	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o nSieve
