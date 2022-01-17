@@ -1,34 +1,48 @@
-OBJ = BoostedSieve EnumSieve NVSieve LayerSieve nSieve LDGaussSieve fishing 
+OBJ = tool.o basis.o UidHashTable.o pool.o NVSieve.o 3Sieve.o BoostedSieve.o
 CXX = g++
 CFLAGS = -O3 -g -funroll-loops -ftree-vectorize -fopenmp -mfma -mavx2 -mavx512f -mavx512vl -march=native -pthread -std=c++11
 TOOLCHAINS = -lntl -lgmp -lm -lgf2x
 LIBDIR = -I/home/zyzhao/work/packages/include -L/home/zyzhao/work/packages/lib
 
-BoostedSieve: BoostedSieve.cpp
-	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o BoostedSieve 
+all: test
 
-EnumSieve: EnumSieve.cpp
-	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o EnumSieve 
+test: test.cpp $(OBJ)
+	$(CXX) $(CFLAGS) $^ $(LIBDIR) $(TOOLCHAINS) -o test
 
-NVSieve: NVSieve.cpp
-	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o NVSieve
+pool.o: pool.cpp 
+	$(CXX) $(CFLAGS) $^ $(LIBDIR) $(TOOLCHAINS) -c
 
-LayerSieve: LayerSieve.cpp
-	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o LayerSieve
+UidHashTable.o: UidHashTable.cpp 
+	$(CXX) $(CFLAGS) $^ $(LIBDIR) $(TOOLCHAINS) -c
 
-nSieve: nSieve.cpp
-	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o nSieve
+basis.o: basis.cpp 	
+	$(CXX) $(CFLAGS) $^ $(LIBDIR) $(TOOLCHAINS) -c
 
-LDGaussSieve: LDGaussSieve.cpp
-	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o LDGaussSieve
+tool.o: tool.cpp	
+	$(CXX) $(CFLAGS) $^ $(LIBDIR) $(TOOLCHAINS) -c
 
-fishing: fishing.cpp
-	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o fishing
+NVSieve.o: NVSieve.cpp
+	$(CXX) $(CFLAGS) $^ $(LIBDIR) $(TOOLCHAINS) -c
+
+3Sieve.o: 3Sieve.cpp
+	$(CXX) $(CFLAGS) $^ $(LIBDIR) $(TOOLCHAINS) -c
+
+BoostedSieve.o: BoostedSieve.cpp
+	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -c
+
+#nSieve: nSieve.cpp
+#	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o nSieve
+
+#EnumSieve: EnumSieve.cpp
+#	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o EnumSieve 
+
+#LayerSieve: LayerSieve.cpp
+#	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o LayerSieve
+
+#fishing: fishing.cpp
+#	$(CXX) $(CFLAGS) $< $(LIBDIR) $(TOOLCHAINS) -o fishing
+
 
 clean:
 	-rm $(OBJ)
-	
-#I have to prepare for the final exam next week....
-#after that I will first implement NV-sieve as a baseline, maybe with some features in g6k to get dim for free, then try to accelerate it by nSieve.
-#another thing to try is the boost sieve, may be it can gives a larger dim for free thus asymptotically faster
 
